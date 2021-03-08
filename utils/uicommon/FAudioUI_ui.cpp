@@ -1,6 +1,6 @@
 /* FAudio - XAudio Reimplementation for FNA
  *
- * Copyright (c) 2011-2020 Ethan Lee, Luigi Auriemma, and the MonoGame Team
+ * Copyright (c) 2011-2021 Ethan Lee, Luigi Auriemma, and the MonoGame Team
  *
  * This software is provided 'as-is', without any express or implied warranty.
  * In no event will the authors be held liable for any damages arising from
@@ -112,6 +112,8 @@ void UI_RenderDrawLists(ImDrawData *draw_data)
 
 /* Public API */
 
+static ImGuiContext *imContext = NULL;
+
 void UI_Init(
 	int tab,
 	int left,
@@ -136,6 +138,9 @@ void UI_Init(
 	int *tw,
 	int *th
 ) {
+	imContext = ImGui::CreateContext(NULL);
+	ImGui::SetCurrentContext(imContext);
+
 	ImGuiIO& io = ImGui::GetIO();
 
 	/* Keyboard */
@@ -192,6 +197,10 @@ uint8_t UI_Update(
 
 	/* Time update */
 	io.DeltaTime = deltaTime;
+	if (io.DeltaTime == 0.0f)
+	{
+		io.DeltaTime = 0.01f;
+	}
 
 	/* Input updates not done via UI_Submit*() */
 	io.MousePos = ImVec2((float) mx, (float) my);
@@ -203,6 +212,11 @@ uint8_t UI_Update(
 	/* BEGIN */
 	ImGui::NewFrame();
 	return io.MouseDrawCursor;
+}
+
+void UI_Quit()
+{
+	ImGui::DestroyContext(imContext);
 }
 
 void UI_Render()

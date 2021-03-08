@@ -1,6 +1,6 @@
 /* FAudio - XAudio Reimplementation for FNA
  *
- * Copyright (c) 2011-2020 Ethan Lee, Luigi Auriemma, and the MonoGame Team
+ * Copyright (c) 2011-2021 Ethan Lee, Luigi Auriemma, and the MonoGame Team
  *
  * This software is provided 'as-is', without any express or implied warranty.
  * In no event will the authors be held liable for any damages arising from
@@ -27,6 +27,10 @@
 #include "FAudio_internal.h"
 
 #include <SDL.h>
+
+#if !SDL_VERSION_ATLEAST(2, 0, 9)
+#error "SDL version older than 2.0.9"
+#endif /* !SDL_VERSION_ATLEAST */
 
 /* Mixer Thread */
 
@@ -75,6 +79,8 @@ void FAudio_PlatformInit(
 ) {
 	SDL_AudioDeviceID device;
 	SDL_AudioSpec want, have;
+	const char *driver;
+	int changes = 0;
 
 	FAudio_assert(mixFormat != NULL);
 	FAudio_assert(updateSize != NULL);
@@ -84,9 +90,63 @@ void FAudio_PlatformInit(
 	want.format = AUDIO_F32;
 	want.channels = mixFormat->Format.nChannels;
 	want.silence = 0;
-	want.samples = 1024;
 	want.callback = FAudio_INTERNAL_MixCallback;
 	want.userdata = audio;
+	if (flags & FAUDIO_1024_QUANTUM)
+	{
+		/* Get the sample count for a 21.33ms frame.
+		 * For 48KHz this should be 1024.
+		 */
+		want.samples = (int) (
+			want.freq / (1000.0 / (64.0 / 3.0))
+		);
+	}
+	else
+	{
+		want.samples = want.freq / 100;
+	}
+
+	/* FIXME: SDL bug!
+	 * The PulseAudio backend does this annoying thing where it halves the
+	 * buffer size to prevent latency issues:
+	 *
+	 * https://hg.libsdl.org/SDL/file/df343364c6c5/src/audio/pulseaudio/SDL_pulseaudio.c#l577
+	 *
+	 * To get the _actual_ quantum size we want, we just double the buffer
+	 * size and allow SDL to set the quantum size back to normal.
+	 * -flibit
+	 */
+	driver = SDL_GetCurrentAudioDriver();
+	if (SDL_strcmp(driver, "pulseaudio") == 0)
+	{
+		want.samples *= 2;
+		changes = SDL_AUDIO_ALLOW_SAMPLES_CHANGE;
+	}
+
+	/* FIXME: SDL bug!
+	 * The most common backends support varying samples values, but many
+	 * require a power-of-two value, which XAudio2 is not a fan of.
+	 * Normally SDL creates an intermediary stream to handle this, but this
+	 * has not been written yet:
+	 * https://bugzilla.libsdl.org/show_bug.cgi?id=5136
+	 * -flibit
+	 */
+	else if (	SDL_strcmp(driver, "emscripten") == 0 ||
+			SDL_strcmp(driver, "dsp") == 0	)
+	{
+		want.samples -= 1;
+		want.samples |= want.samples >> 1;
+		want.samples |= want.samples >> 2;
+		want.samples |= want.samples >> 4;
+		want.samples |= want.samples >> 8;
+		want.samples |= want.samples >> 16;
+		want.samples += 1;
+		SDL_Log(
+			"Forcing FAudio quantum to a power-of-two.\n"
+			"You don't actually want this, it's technically a bug:\n"
+			"https://bugzilla.libsdl.org/show_bug.cgi?id=5136"
+		);
+	}
 
 	/* Open the device (or at least try to) */
 iosretry:
@@ -95,16 +155,7 @@ iosretry:
 		0,
 		&want,
 		&have,
-#if SDL_VERSION_ATLEAST(2, 0, 9)
-		(flags & FAUDIO_1024_QUANTUM) ? 0 : SDL_AUDIO_ALLOW_SAMPLES_CHANGE
-#else
-#ifdef _WIN32
-#error Windows absolutely positively needs SDL 2.0.9!
-#else
-#pragma message("Please update to SDL 2.0.9 ASAP!")
-#endif
-		0
-#endif
+		changes
 	);
 	if (device == 0)
 	{
@@ -132,7 +183,12 @@ iosretry:
 	}
 
 	/* Write up the received format for the engine */
-	WriteWaveFormatExtensible(mixFormat, have.channels, have.freq);
+	WriteWaveFormatExtensible(
+		mixFormat,
+		have.channels,
+		have.freq,
+		&DATAFORMAT_SUBTYPE_IEEE_FLOAT
+	);
 	*updateSize = have.samples;
 
 	/* SDL_AudioDeviceID is a Uint32, anybody using a 16-bit PC still? */
@@ -165,9 +221,13 @@ uint32_t FAudio_PlatformGetDeviceDetails(
 ) {
 	const char *name, *envvar;
 	int channels, rate;
+	SDL_AudioSpec spec;
+	uint32_t devcount, i;
 
 	FAudio_zero(details, sizeof(FAudioDeviceDetails));
-	if (index >= FAudio_PlatformGetDeviceCount())
+
+	devcount = FAudio_PlatformGetDeviceCount();
+	if (index >= devcount)
 	{
 		return FAUDIO_E_INVALID_CALL;
 	}
@@ -202,18 +262,123 @@ uint32_t FAudio_PlatformGetDeviceDetails(
 		sizeof(details->DisplayName)
 	);
 
-	/* TODO: SDL_GetAudioDeviceSpec! */
+	/* Environment variables take precedence over all possible values */
 	envvar = SDL_getenv("SDL_AUDIO_FREQUENCY");
-	if (!envvar || ((rate = SDL_atoi(envvar)) == 0))
+	if (envvar != NULL)
+	{
+		rate = SDL_atoi(envvar);
+	}
+	else
+	{
+		rate = 0;
+	}
+	envvar = SDL_getenv("SDL_AUDIO_CHANNELS");
+	if (envvar != NULL)
+	{
+		channels = SDL_atoi(envvar);
+	}
+	else
+	{
+		channels = 0;
+	}
+
+#if SDL_VERSION_ATLEAST(2, 0, 15)
+	if (index == 0)
+	{
+		/* Okay, so go grab something from the liquor cabinet and get
+		 * ready, because this loop is a bit of a trip:
+		 *
+		 * We can't get the spec for the default device, because in
+		 * audio land a "default device" is a completely foreign idea,
+		 * some APIs support it but in reality you just have to pass
+		 * NULL as a driver string and the sound server figures out the
+		 * rest. In some psychotic universe the device can even be a
+		 * network address. No, seriously.
+		 *
+		 * So what do we do? Well, at least in my experience shipping
+		 * for the PC, the easiest thing to do is assume that the
+		 * highest spec in the list is what you should target, even if
+		 * it turns out that's not the default at the time you create
+		 * your device.
+		 *
+		 * Consider a laptop that has built-in stereo speakers, but is
+		 * connected to a home theater system with 5.1 audio. It may be
+		 * the case that the stereo audio is active, but the user may
+		 * at some point move audio to 5.1, at which point the server
+		 * will simply move the endpoint from underneath us and move our
+		 * output stream to the new device. At that point, you _really_
+		 * want to already be pushing out 5.1, because if not the user
+		 * will be stuck recreating the whole program, which on many
+		 * platforms is an instant cert failure. The tradeoff is that
+		 * you're potentially downmixing a 5.1 stream to stereo, which
+		 * is a bit wasteful, but presumably the hardware can handle it
+		 * if they were able to use a 5.1 system to begin with.
+		 *
+		 * So, we just aim for the highest channel count on the system.
+		 * We also do this with sample rate to a lesser degree; we try
+		 * to use a single device spec at a time, so it may be that
+		 * the sample rate you get isn't the highest from the list if
+		 * another device had a higher channel count.
+		 *
+		 * Lastly, if you set SDL_AUDIO_CHANNELS but not
+		 * SDL_AUDIO_FREQUENCY, we don't bother checking for a sample
+		 * rate, we fall through to the hardcoded value at the bottom of
+		 * this function.
+		 *
+		 * I'm so tired.
+		 *
+		 * -flibit
+		 */
+		if (channels <= 0)
+		{
+			const uint8_t setRate = (rate <= 0);
+			devcount -= 1; /* Subtracting the default index */
+			for (i = 0; i < devcount; i += 1)
+			{
+				SDL_GetAudioDeviceSpec(i, 0, &spec);
+				if (spec.channels > channels)
+				{
+					channels = spec.channels;
+					if (setRate)
+					{
+						/* May be 0! That's okay! */
+						rate = spec.freq;
+					}
+				}
+			}
+		}
+	}
+	else
+	{
+		SDL_GetAudioDeviceSpec(index - 1, 0, &spec);
+		if ((spec.freq > 0) && (rate <= 0))
+		{
+			rate = spec.freq;
+		}
+		if ((spec.channels > 0) && (channels <= 0))
+		{
+			channels = spec.channels;
+		}
+	}
+#endif /* SDL >= 2.0.15 */
+
+	/* If we make it all the way here with no format, hardcode a sane one */
+	if (rate <= 0)
 	{
 		rate = 48000;
 	}
-	envvar = SDL_getenv("SDL_AUDIO_CHANNELS");
-	if (!envvar || ((channels = SDL_atoi(envvar)) == 0))
+	if (channels <= 0)
 	{
 		channels = 2;
 	}
-	WriteWaveFormatExtensible(&details->OutputFormat, channels, rate);
+
+	/* Write the format, finally. */
+	WriteWaveFormatExtensible(
+		&details->OutputFormat,
+		channels,
+		rate,
+		&DATAFORMAT_SUBTYPE_PCM
+	);
 	return 0;
 }
 

@@ -1,6 +1,6 @@
 /* FAudio - XAudio Reimplementation for FNA
  *
- * Copyright (c) 2011-2020 Ethan Lee, Luigi Auriemma, and the MonoGame Team
+ * Copyright (c) 2011-2021 Ethan Lee, Luigi Auriemma, and the MonoGame Team
  *
  * This software is provided 'as-is', without any express or implied warranty.
  * In no event will the authors be held liable for any damages arising from
@@ -49,9 +49,9 @@
 	/* AArch64 guarantees NEON. */
 	#define NEED_SCALAR_CONVERTER_FALLBACKS 0
 #elif __MACOSX__
-	/* Some build systems may need to specify this. Also, macOS ARM? Sigh */
-	#ifndef __SSE2__
-	#error macOS does not have SSE2? Bad compiler? They actually moved to ARM?!
+	/* Some build systems may need to specify this. */
+	#if !defined(__SSE2__) && !defined(__ARM_NEON__)
+	#error macOS does not have SSE2/NEON? Bad compiler?
 	#endif
 
 	/* Mac OS X/Intel guarantees SSE2. */
@@ -1282,10 +1282,8 @@ void FAudio_INTERNAL_Mix_Generic_Scalar(
 	uint32_t toMix,
 	uint32_t srcChans,
 	uint32_t dstChans,
-	float baseVolume,
 	float *restrict src,
 	float *restrict dst,
-	float *restrict channelVolume,
 	float *restrict coefficients
 ) {
 	uint32_t i, co, ci;
@@ -1296,30 +1294,69 @@ void FAudio_INTERNAL_Mix_Generic_Scalar(
 		{
 			dst[co] += (
 				src[ci] *
-				channelVolume[ci] *
-				baseVolume *
 				coefficients[co * srcChans + ci]
 			);
 		}
 	}
 }
 
+#if HAVE_SSE2_INTRINSICS
+/* SSE horizontal add by Peter Cordes, CC-BY-SA.
+ * From https://stackoverflow.com/a/35270026 */
+static inline float FAudio_simd_hadd(__m128 v)
+{
+	__m128 shuf = _mm_shuffle_ps(v, v, _MM_SHUFFLE(2, 3, 0, 1));
+	__m128 sums = _mm_add_ps(v, shuf);
+	shuf = _mm_movehl_ps(shuf, sums);
+	sums = _mm_add_ss(sums, shuf);
+	return _mm_cvtss_f32(sums);
+}
+
+void FAudio_INTERNAL_Mix_Generic_SSE2(
+	uint32_t toMix,
+	uint32_t srcChans,
+	uint32_t dstChans,
+	float *restrict src,
+	float *restrict dst,
+	float *restrict coefficients
+) {
+	uint32_t i, co, ci;
+	for (i = 0; i < toMix; i += 1, src += srcChans, dst += dstChans)
+	for (co = 0; co < dstChans; co += 1)
+	{
+		for (ci = 0; srcChans - ci >= 4; ci += 4)
+		{
+			/* do SIMD */
+			const __m128 vols = _mm_loadu_ps(&coefficients[co * srcChans + ci]);
+			const __m128 dat = _mm_loadu_ps(&src[ci]);
+			dst[co] += FAudio_simd_hadd(_mm_mul_ps(dat, vols));
+		}
+
+		for (; ci < srcChans; ci += 1)
+		{
+			/* do scalar */
+			dst[co] += (
+				src[ci] *
+				coefficients[co * srcChans + ci]
+			);
+		}
+	}
+}
+#endif /* HAVE_SSE2_INTRINSICS */
+
 void FAudio_INTERNAL_Mix_1in_1out_Scalar(
 	uint32_t toMix,
 	uint32_t UNUSED1,
 	uint32_t UNUSED2,
-	float baseVolume,
 	float *restrict src,
 	float *restrict dst,
-	float *restrict channelVolume,
 	float *restrict coefficients
 ) {
 	uint32_t i;
-	float totalVolume = baseVolume * channelVolume[0] * coefficients[0];
 	for (i = 0; i < toMix; i += 1, src += 1, dst += 1)
 	{
 		/* Base source data, combined with the coefficients */
-		dst[0] += src[0] * totalVolume;
+		dst[0] += src[0] * coefficients[0];
 	}
 }
 
@@ -1327,22 +1364,15 @@ void FAudio_INTERNAL_Mix_1in_2out_Scalar(
 	uint32_t toMix,
 	uint32_t UNUSED1,
 	uint32_t UNUSED2,
-	float baseVolume,
 	float *restrict src,
 	float *restrict dst,
-	float *restrict channelVolume,
 	float *restrict coefficients
 ) {
 	uint32_t i;
-	float totalVolume = baseVolume * channelVolume[0];
 	for (i = 0; i < toMix; i += 1, src += 1, dst += 2)
 	{
-		/* Base source data... */
-		const float sample = src[0] * totalVolume;
-
-		/* ... combined with the coefficients. */
-		dst[0] += sample * coefficients[0];
-		dst[1] += sample * coefficients[1];
+		dst[0] += src[0] * coefficients[0];
+		dst[1] += src[0] * coefficients[1];
 	}
 }
 
@@ -1350,26 +1380,19 @@ void FAudio_INTERNAL_Mix_1in_6out_Scalar(
 	uint32_t toMix,
 	uint32_t UNUSED1,
 	uint32_t UNUSED2,
-	float baseVolume,
 	float *restrict src,
 	float *restrict dst,
-	float *restrict channelVolume,
 	float *restrict coefficients
 ) {
 	uint32_t i;
-	float totalVolume = baseVolume * channelVolume[0];
 	for (i = 0; i < toMix; i += 1, src += 1, dst += 6)
 	{
-		/* Base source data... */
-		const float sample = src[0] * totalVolume;
-
-		/* ... combined with the coefficients. */
-		dst[0] += sample * coefficients[0];
-		dst[1] += sample * coefficients[1];
-		dst[2] += sample * coefficients[2];
-		dst[3] += sample * coefficients[3];
-		dst[4] += sample * coefficients[4];
-		dst[5] += sample * coefficients[5];
+		dst[0] += src[0] * coefficients[0];
+		dst[1] += src[0] * coefficients[1];
+		dst[2] += src[0] * coefficients[2];
+		dst[3] += src[0] * coefficients[3];
+		dst[4] += src[0] * coefficients[4];
+		dst[5] += src[0] * coefficients[5];
 	}
 }
 
@@ -1377,28 +1400,21 @@ void FAudio_INTERNAL_Mix_1in_8out_Scalar(
 	uint32_t toMix,
 	uint32_t UNUSED1,
 	uint32_t UNUSED2,
-	float baseVolume,
 	float *restrict src,
 	float *restrict dst,
-	float *restrict channelVolume,
 	float *restrict coefficients
 ) {
 	uint32_t i;
-	float totalVolume = baseVolume * channelVolume[0];
 	for (i = 0; i < toMix; i += 1, src += 1, dst += 8)
 	{
-		/* Base source data... */
-		const float sample = src[0] * totalVolume;
-
-		/* ... combined with the coefficients. */
-		dst[0] += sample * coefficients[0];
-		dst[1] += sample * coefficients[1];
-		dst[2] += sample * coefficients[2];
-		dst[3] += sample * coefficients[3];
-		dst[4] += sample * coefficients[4];
-		dst[5] += sample * coefficients[5];
-		dst[6] += sample * coefficients[6];
-		dst[7] += sample * coefficients[7];
+		dst[0] += src[0] * coefficients[0];
+		dst[1] += src[0] * coefficients[1];
+		dst[2] += src[0] * coefficients[2];
+		dst[3] += src[0] * coefficients[3];
+		dst[4] += src[0] * coefficients[4];
+		dst[5] += src[0] * coefficients[5];
+		dst[6] += src[0] * coefficients[6];
+		dst[7] += src[0] * coefficients[7];
 	}
 }
 
@@ -1406,21 +1422,17 @@ void FAudio_INTERNAL_Mix_2in_1out_Scalar(
 	uint32_t toMix,
 	uint32_t UNUSED1,
 	uint32_t UNUSED2,
-	float baseVolume,
 	float *restrict src,
 	float *restrict dst,
-	float *restrict channelVolume,
 	float *restrict coefficients
 ) {
 	uint32_t i;
-	float totalVolumeL = baseVolume * channelVolume[0] * coefficients[0];
-	float totalVolumeR = baseVolume * channelVolume[1] * coefficients[1];
 	for (i = 0; i < toMix; i += 1, src += 2, dst += 1)
 	{
 		/* Base source data, combined with the coefficients */
 		dst[0] += (
-			(src[0] * totalVolumeL) +
-			(src[1] * totalVolumeR)
+			(src[0] * coefficients[0]) +
+			(src[1] * coefficients[1])
 		);
 	}
 }
@@ -1429,29 +1441,20 @@ void FAudio_INTERNAL_Mix_2in_2out_Scalar(
 	uint32_t toMix,
 	uint32_t UNUSED1,
 	uint32_t UNUSED2,
-	float baseVolume,
 	float *restrict src,
 	float *restrict dst,
-	float *restrict channelVolume,
 	float *restrict coefficients
 ) {
 	uint32_t i;
-	float totalVolumeL = baseVolume * channelVolume[0];
-	float totalVolumeR = baseVolume * channelVolume[1];
 	for (i = 0; i < toMix; i += 1, src += 2, dst += 2)
 	{
-		/* Base source data... */
-		const float left = src[0] * totalVolumeL;
-		const float right = src[1] * totalVolumeR;
-
-		/* ... combined with the coefficients. */
 		dst[0] += (
-			(left * coefficients[0]) +
-			(right * coefficients[1])
+			(src[0] * coefficients[0]) +
+			(src[1] * coefficients[1])
 		);
 		dst[1] += (
-			(left * coefficients[2]) +
-			(right * coefficients[3])
+			(src[0] * coefficients[2]) +
+			(src[1] * coefficients[3])
 		);
 	}
 }
@@ -1460,45 +1463,36 @@ void FAudio_INTERNAL_Mix_2in_6out_Scalar(
 	uint32_t toMix,
 	uint32_t UNUSED1,
 	uint32_t UNUSED2,
-	float baseVolume,
 	float *restrict src,
 	float *restrict dst,
-	float *restrict channelVolume,
 	float *restrict coefficients
 ) {
 	uint32_t i;
-	float totalVolumeL = baseVolume * channelVolume[0];
-	float totalVolumeR = baseVolume * channelVolume[1];
 	for (i = 0; i < toMix; i += 1, src += 2, dst += 6)
 	{
-		/* Base source data... */
-		const float left = src[0] * totalVolumeL;
-		const float right = src[1] * totalVolumeR;
-
-		/* ... combined with the coefficients. */
 		dst[0] += (
-			(left * coefficients[0]) +
-			(right * coefficients[1])
+			(src[0] * coefficients[0]) +
+			(src[1] * coefficients[1])
 		);
 		dst[1] += (
-			(left * coefficients[2]) +
-			(right * coefficients[3])
+			(src[0] * coefficients[2]) +
+			(src[1] * coefficients[3])
 		);
 		dst[2] += (
-			(left * coefficients[4]) +
-			(right * coefficients[5])
+			(src[0] * coefficients[4]) +
+			(src[1] * coefficients[5])
 		);
 		dst[3] += (
-			(left * coefficients[6]) +
-			(right * coefficients[7])
+			(src[0] * coefficients[6]) +
+			(src[1] * coefficients[7])
 		);
 		dst[4] += (
-			(left * coefficients[8]) +
-			(right * coefficients[9])
+			(src[0] * coefficients[8]) +
+			(src[1] * coefficients[9])
 		);
 		dst[5] += (
-			(left * coefficients[10]) +
-			(right * coefficients[11])
+			(src[0] * coefficients[10]) +
+			(src[1] * coefficients[11])
 		);
 	}
 }
@@ -1507,53 +1501,44 @@ void FAudio_INTERNAL_Mix_2in_8out_Scalar(
 	uint32_t toMix,
 	uint32_t UNUSED1,
 	uint32_t UNUSED2,
-	float baseVolume,
 	float *restrict src,
 	float *restrict dst,
-	float *restrict channelVolume,
 	float *restrict coefficients
 ) {
 	uint32_t i;
-	float totalVolumeL = baseVolume * channelVolume[0];
-	float totalVolumeR = baseVolume * channelVolume[1];
 	for (i = 0; i < toMix; i += 1, src += 2, dst += 8)
 	{
-		/* Base source data... */
-		const float left = src[0] * totalVolumeL;
-		const float right = src[1] * totalVolumeR;
-
-		/* ... combined with the coefficients. */
 		dst[0] += (
-			(left * coefficients[0]) +
-			(right * coefficients[1])
+			(src[0] * coefficients[0]) +
+			(src[1] * coefficients[1])
 		);
 		dst[1] += (
-			(left * coefficients[2]) +
-			(right * coefficients[3])
+			(src[0] * coefficients[2]) +
+			(src[1] * coefficients[3])
 		);
 		dst[2] += (
-			(left * coefficients[4]) +
-			(right * coefficients[5])
+			(src[0] * coefficients[4]) +
+			(src[1] * coefficients[5])
 		);
 		dst[3] += (
-			(left * coefficients[6]) +
-			(right * coefficients[7])
+			(src[0] * coefficients[6]) +
+			(src[1] * coefficients[7])
 		);
 		dst[4] += (
-			(left * coefficients[8]) +
-			(right * coefficients[9])
+			(src[0] * coefficients[8]) +
+			(src[1] * coefficients[9])
 		);
 		dst[5] += (
-			(left * coefficients[10]) +
-			(right * coefficients[11])
+			(src[0] * coefficients[10]) +
+			(src[1] * coefficients[11])
 		);
 		dst[6] += (
-			(left * coefficients[12]) +
-			(right * coefficients[13])
+			(src[0] * coefficients[12]) +
+			(src[1] * coefficients[13])
 		);
 		dst[7] += (
-			(left * coefficients[14]) +
-			(right * coefficients[15])
+			(src[0] * coefficients[14]) +
+			(src[1] * coefficients[15])
 		);
 	}
 }
@@ -1585,6 +1570,8 @@ void (*FAudio_INTERNAL_Amplify)(
 	float volume
 );
 
+FAudioMixCallback FAudio_INTERNAL_Mix_Generic;
+
 void FAudio_INTERNAL_InitSIMDFunctions(uint8_t hasSSE2, uint8_t hasNEON)
 {
 #if HAVE_SSE2_INTRINSICS
@@ -1596,6 +1583,7 @@ void FAudio_INTERNAL_InitSIMDFunctions(uint8_t hasSSE2, uint8_t hasNEON)
 		FAudio_INTERNAL_ResampleMono = FAudio_INTERNAL_ResampleMono_SSE2;
 		FAudio_INTERNAL_ResampleStereo = FAudio_INTERNAL_ResampleStereo_SSE2;
 		FAudio_INTERNAL_Amplify = FAudio_INTERNAL_Amplify_SSE2;
+		FAudio_INTERNAL_Mix_Generic = FAudio_INTERNAL_Mix_Generic_SSE2;
 		return;
 	}
 #endif
@@ -1608,6 +1596,7 @@ void FAudio_INTERNAL_InitSIMDFunctions(uint8_t hasSSE2, uint8_t hasNEON)
 		FAudio_INTERNAL_ResampleMono = FAudio_INTERNAL_ResampleMono_NEON;
 		FAudio_INTERNAL_ResampleStereo = FAudio_INTERNAL_ResampleStereo_NEON;
 		FAudio_INTERNAL_Amplify = FAudio_INTERNAL_Amplify_NEON;
+		FAudio_INTERNAL_Mix_Generic = FAudio_INTERNAL_Mix_Generic_Scalar;
 		return;
 	}
 #endif
@@ -1618,6 +1607,7 @@ void FAudio_INTERNAL_InitSIMDFunctions(uint8_t hasSSE2, uint8_t hasNEON)
 	FAudio_INTERNAL_ResampleMono = FAudio_INTERNAL_ResampleMono_Scalar;
 	FAudio_INTERNAL_ResampleStereo = FAudio_INTERNAL_ResampleStereo_Scalar;
 	FAudio_INTERNAL_Amplify = FAudio_INTERNAL_Amplify_Scalar;
+	FAudio_INTERNAL_Mix_Generic = FAudio_INTERNAL_Mix_Generic_Scalar;
 #else
 	FAudio_assert(0 && "Need converter functions!");
 #endif

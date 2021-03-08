@@ -1,6 +1,6 @@
 /* FAudio - XAudio Reimplementation for FNA
  *
- * Copyright (c) 2011-2020 Ethan Lee, Luigi Auriemma, and the MonoGame Team
+ * Copyright (c) 2011-2021 Ethan Lee, Luigi Auriemma, and the MonoGame Team
  *
  * This software is provided 'as-is', without any express or implied warranty.
  * In no event will the authors be held liable for any damages arising from
@@ -95,10 +95,23 @@ typedef struct FACTDSPPreset
 
 typedef enum FACTNoticationsFlags
 {
-	NOTIFY_CUEDESTROY        = 0x0001,
-	NOTIFY_SOUNDBANKDESTROY  = 0x0002,
-	NOTIFY_WAVEBANKDESTROY   = 0x0004,
-	NOTIFY_WAVEDESTROY       = 0x0008,
+	NOTIFY_CUEPREPARED           = 0x00000001,
+	NOTIFY_CUEPLAY               = 0x00000002,
+	NOTIFY_CUESTOP               = 0x00000004,
+	NOTIFY_CUEDESTROY            = 0x00000008,
+	NOTIFY_MARKER                = 0x00000010,
+	NOTIFY_SOUNDBANKDESTROY      = 0x00000020,
+	NOTIFY_WAVEBANKDESTROY       = 0x00000040,
+	NOTIFY_LOCALVARIABLECHANGED  = 0x00000080,
+	NOTIFY_GLOBALVARIABLECHANGED = 0x00000100,
+	NOTIFY_GUICONNECTED          = 0x00000200,
+	NOTIFY_GUIDISCONNECTED       = 0x00000400,
+	NOTIFY_WAVEPREPARED          = 0x00000800,
+	NOTIFY_WAVEPLAY              = 0x00001000,
+	NOTIFY_WAVESTOP              = 0x00002000,
+	NOTIFY_WAVELOOPED            = 0x00004000,
+	NOTIFY_WAVEDESTROY           = 0x00008000,
+	NOTIFY_WAVEBANKPREPARED      = 0x00010000
 } FACTNoticationsFlags;
 
 /* Internal SoundBank Types */
@@ -427,6 +440,9 @@ struct FACTAudioEngine
 	void *sb_context;
 	void *wb_context;
 	void *wave_context;
+
+	/* Settings handle */
+	void *settings;
 };
 
 struct FACTSoundBank
@@ -568,6 +584,8 @@ uint8_t FACT_INTERNAL_CreateSound(FACTCue *cue, uint16_t fadeInMS);
 void FACT_INTERNAL_DestroySound(FACTSoundInstance *sound);
 void FACT_INTERNAL_BeginFadeOut(FACTSoundInstance *sound, uint16_t fadeOutMS);
 void FACT_INTERNAL_BeginReleaseRPC(FACTSoundInstance *sound, uint16_t releaseMS);
+
+void FACT_INTERNAL_SendCueNotification(FACTCue *cue, FACTNoticationsFlags flag, uint8_t type);
 
 /* RPC Helper Functions */
 

@@ -1,6 +1,6 @@
 /* FAudio - XAudio Reimplementation for FNA
  *
- * Copyright (c) 2011-2020 Ethan Lee, Luigi Auriemma, and the MonoGame Team
+ * Copyright (c) 2011-2021 Ethan Lee, Luigi Auriemma, and the MonoGame Team
  *
  * This software is provided 'as-is', without any express or implied warranty.
  * In no event will the authors be held liable for any damages arising from
@@ -101,6 +101,7 @@ typedef void (FACTCALL * FACTNotificationCallback)(
 	const FACTNotification *pNotification
 );
 
+/* FIXME: ABI bug! This should be pack(1) explicitly. Do not memcpy this! */
 typedef struct FACTRuntimeParameters
 {
 	uint32_t lookAheadTime;
@@ -556,7 +557,7 @@ FACTAPI uint32_t FACTAudioEngine_PrepareStreamingWave(
 	FACTStreamingParameters streamingParams,
 	uint32_t dwAlignment,
 	uint32_t *pdwSeekTable, /* Optional! */
-	uint8_t *pbWaveData,
+	uint8_t *pbWaveData, /* ABI bug, do not use! */
 	uint32_t dwPlayOffset,
 	uint8_t nLoopCount,
 	FACTWave **ppWave

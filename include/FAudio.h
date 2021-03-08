@@ -1,6 +1,6 @@
 /* FAudio - XAudio Reimplementation for FNA
  *
- * Copyright (c) 2011-2020 Ethan Lee, Luigi Auriemma, and the MonoGame Team
+ * Copyright (c) 2011-2021 Ethan Lee, Luigi Auriemma, and the MonoGame Team
  *
  * This software is provided 'as-is', without any express or implied warranty.
  * In no event will the authors be held liable for any damages arising from
@@ -390,7 +390,7 @@ typedef struct FAudioDebugConfiguration
 #define _SPEAKER_POSITIONS_
 #endif
 
-#ifndef _SPEAKER_COMBINATIONS_
+#ifndef SPEAKER_MONO
 #define SPEAKER_MONO	SPEAKER_FRONT_CENTER
 #define SPEAKER_STEREO	(SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT)
 #define SPEAKER_2POINT1 \
@@ -446,7 +446,6 @@ typedef struct FAudioDebugConfiguration
 		SPEAKER_SIDE_LEFT	| \
 		SPEAKER_SIDE_RIGHT	)
 #define SPEAKER_XBOX SPEAKER_5POINT1
-#define _SPEAKER_COMBINATIONS_
 #endif
 
 #define FAUDIO_FORMAT_PCM		1
@@ -466,9 +465,9 @@ extern FAudioGUID DATAFORMAT_SUBTYPE_IEEE_FLOAT;
 #define FAUDIO_TARGET_VERSION 8 /* Targeting compatibility with XAudio 2.8 */
 
 #define FAUDIO_ABI_VERSION	 0
-#define FAUDIO_MAJOR_VERSION	20
+#define FAUDIO_MAJOR_VERSION	21
 #define FAUDIO_MINOR_VERSION	 3
-#define FAUDIO_PATCH_VERSION	 0
+#define FAUDIO_PATCH_VERSION	 5
 
 #define FAUDIO_COMPILED_VERSION ( \
 	(FAUDIO_ABI_VERSION * 100 * 100 * 100) + \

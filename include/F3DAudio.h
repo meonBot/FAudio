@@ -1,6 +1,6 @@
 /* FAudio - XAudio Reimplementation for FNA
  *
- * Copyright (c) 2011-2020 Ethan Lee, Luigi Auriemma, and the MonoGame Team
+ * Copyright (c) 2011-2021 Ethan Lee, Luigi Auriemma, and the MonoGame Team
  *
  * This software is provided 'as-is', without any express or implied warranty.
  * In no event will the authors be held liable for any damages arising from
@@ -67,7 +67,7 @@ extern "C" {
 #define _SPEAKER_POSITIONS_
 #endif
 
-#ifndef _SPEAKER_COMBINATIONS_
+#ifndef SPEAKER_MONO
 #define SPEAKER_MONO	SPEAKER_FRONT_CENTER
 #define SPEAKER_STEREO	(SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT)
 #define SPEAKER_2POINT1 \
@@ -123,7 +123,6 @@ extern "C" {
 		SPEAKER_SIDE_LEFT	| \
 		SPEAKER_SIDE_RIGHT	)
 #define SPEAKER_XBOX SPEAKER_5POINT1
-#define _SPEAKER_COMBINATIONS_
 #endif
 
 #define F3DAUDIO_PI			3.141592654f

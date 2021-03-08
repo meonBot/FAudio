@@ -1,6 +1,6 @@
 /* FAudio - XAudio Reimplementation for FNA
  *
- * Copyright (c) 2011-2020 Ethan Lee, Luigi Auriemma, and the MonoGame Team
+ * Copyright (c) 2011-2021 Ethan Lee, Luigi Auriemma, and the MonoGame Team
  *
  * This software is provided 'as-is', without any express or implied warranty.
  * In no event will the authors be held liable for any damages arising from
@@ -305,14 +305,14 @@ static uint32_t FAudio_INTERNAL_GetBytesRequested(
 
 	LOG_FUNC_ENTER(voice->audio)
 
-#ifdef HAVE_FFMPEG
-	if (voice->src.ffmpeg != NULL)
+#ifdef HAVE_GSTREAMER
+	if (voice->src.gstreamer != NULL)
 	{
 		/* Always 0, per the spec */
 		LOG_FUNC_EXIT(voice->audio)
 		return 0;
 	}
-#endif /* HAVE_FFMPEG */
+#endif /* HAVE_GSTREAMER */
 	while (list != NULL && decoding > 0)
 	{
 		buffer = &list->buffer;
@@ -382,10 +382,16 @@ static void FAudio_INTERNAL_DecodeBuffers(
 			if (	voice->src.callback != NULL &&
 				voice->src.callback->OnBufferStart != NULL	)
 			{
+				FAudio_PlatformUnlockMutex(voice->audio->sourceLock);
+				LOG_MUTEX_UNLOCK(voice->audio, voice->audio->sourceLock)
+
 				voice->src.callback->OnBufferStart(
 					voice->src.callback,
 					buffer->pContext
 				);
+
+				FAudio_PlatformLockMutex(voice->audio->sourceLock);
+				LOG_MUTEX_LOCK(voice->audio, voice->audio->sourceLock)
 			}
 		}
 
@@ -435,20 +441,26 @@ static void FAudio_INTERNAL_DecodeBuffers(
 				if (	voice->src.callback != NULL &&
 					voice->src.callback->OnLoopEnd != NULL	)
 				{
+					FAudio_PlatformUnlockMutex(voice->audio->sourceLock);
+					LOG_MUTEX_UNLOCK(voice->audio, voice->audio->sourceLock)
+
 					voice->src.callback->OnLoopEnd(
 						voice->src.callback,
 						buffer->pContext
 					);
+
+					FAudio_PlatformLockMutex(voice->audio->sourceLock);
+					LOG_MUTEX_LOCK(voice->audio, voice->audio->sourceLock)
 				}
 			}
 			else
 			{
-#ifdef HAVE_FFMPEG
-				if (voice->src.ffmpeg != NULL)
+#ifdef HAVE_GSTREAMER
+				if (voice->src.gstreamer != NULL)
 				{
-					FAudio_FFMPEG_reset(voice);
+					FAudio_GSTREAMER_end_buffer(voice);
 				}
-#endif /* HAVE_FFMPEG */
+#endif /* HAVE_GSTREAMER */
 				/* For EOS we can stop storing fraction offsets */
 				if (buffer->Flags & FAUDIO_END_OF_STREAM)
 				{
@@ -491,6 +503,9 @@ static void FAudio_INTERNAL_DecodeBuffers(
 				/* Callbacks */
 				if (voice->src.callback != NULL)
 				{
+					FAudio_PlatformUnlockMutex(voice->audio->sourceLock);
+					LOG_MUTEX_UNLOCK(voice->audio, voice->audio->sourceLock)
+
 					if (voice->src.callback->OnBufferEnd != NULL)
 					{
 						voice->src.callback->OnBufferEnd(
@@ -520,6 +535,9 @@ static void FAudio_INTERNAL_DecodeBuffers(
 							buffer->pContext
 						);
 					}
+
+					FAudio_PlatformLockMutex(voice->audio->sourceLock);
+					LOG_MUTEX_LOCK(voice->audio, voice->audio->sourceLock)
 				}
 
 				voice->audio->pFree(toDelete);
@@ -618,6 +636,20 @@ static inline void FAudio_INTERNAL_FilterVoice(
 	LOG_FUNC_EXIT(audio)
 }
 
+static void FAudio_INTERNAL_ResizeEffectChainCache(FAudio *audio, uint32_t samples)
+{
+	LOG_FUNC_ENTER(audio)
+	if (samples > audio->effectChainSamples)
+	{
+		audio->effectChainSamples = samples;
+		audio->effectChainCache = (float*) audio->pRealloc(
+			audio->effectChainCache,
+			sizeof(float) * audio->effectChainSamples
+		);
+	}
+	LOG_FUNC_EXIT(audio)
+}
+
 static inline float *FAudio_INTERNAL_ProcessEffectChain(
 	FAudioVoice *voice,
 	float *buffer,
@@ -700,8 +732,25 @@ static inline float *FAudio_INTERNAL_ProcessEffectChain(
 
 	*samples = dstParams.ValidFrameCount;
 
+	/* Save the output buffer-flags so the mixer-function can determine when it's save to stop processing the effect chain */
+	voice->effects.state = dstParams.BufferFlags;
+
 	LOG_FUNC_EXIT(voice->audio)
 	return (float*) dstParams.pBuffer;
+}
+
+static void FAudio_INTERNAL_ResizeResampleCache(FAudio *audio, uint32_t samples)
+{
+       LOG_FUNC_ENTER(audio)
+       if (samples > audio->resampleSamples)
+       {
+               audio->resampleSamples = samples;
+               audio->resampleCache = (float*) audio->pRealloc(
+                       audio->resampleCache,
+                       sizeof(float) * audio->resampleSamples
+               );
+       }
+       LOG_FUNC_EXIT(audio)
 }
 
 static void FAudio_INTERNAL_MixSource(FAudioSourceVoice *voice)
@@ -722,16 +771,15 @@ static void FAudio_INTERNAL_MixSource(FAudioSourceVoice *voice)
 
 	LOG_FUNC_ENTER(voice->audio)
 
+	FAudio_PlatformLockMutex(voice->sendLock);
+	LOG_MUTEX_LOCK(voice->audio, voice->sendLock)
+
 	/* Calculate the resample stepping value */
 	if (voice->src.resampleFreq != voice->src.freqRatio * voice->src.format->nSamplesPerSec)
 	{
-		FAudio_PlatformLockMutex(voice->sendLock);
-		LOG_MUTEX_LOCK(voice->audio, voice->sendLock)
 		out = (voice->sends.SendCount == 0) ?
 			voice->audio->master : /* Barf */
 			voice->sends.pSends->pOutputVoice;
-		FAudio_PlatformUnlockMutex(voice->sendLock);
-		LOG_MUTEX_UNLOCK(voice->audio, voice->sendLock)
 		outputRate = (out->type == FAUDIO_VOICE_MASTER) ?
 			out->master.inputSampleRate :
 			out->mix.inputSampleRate;
@@ -747,6 +795,10 @@ static void FAudio_INTERNAL_MixSource(FAudioSourceVoice *voice)
 	if (voice->src.active == 2)
 	{
 		/* We're just playing tails, skip all buffer stuff */
+		FAudio_INTERNAL_ResizeResampleCache(
+				voice->audio,
+				voice->src.resampleSamples * voice->src.format->nChannels
+		);
 		mixed = voice->src.resampleSamples;
 		FAudio_zero(
 			voice->audio->resampleCache,
@@ -763,24 +815,59 @@ static void FAudio_INTERNAL_MixSource(FAudioSourceVoice *voice)
 	/* ... fixed to int, truncating extra fraction from rounding. */
 	toDecode >>= FIXED_PRECISION;
 
-	FAudio_PlatformLockMutex(voice->src.bufferLock);
-	LOG_MUTEX_LOCK(voice->audio, voice->src.bufferLock)
-
 	/* First voice callback */
 	if (	voice->src.callback != NULL &&
 		voice->src.callback->OnVoiceProcessingPassStart != NULL	)
 	{
+		FAudio_PlatformUnlockMutex(voice->sendLock);
+		LOG_MUTEX_UNLOCK(voice->audio, voice->sendLock)
+
+		FAudio_PlatformUnlockMutex(voice->audio->sourceLock);
+		LOG_MUTEX_UNLOCK(voice->audio, voice->audio->sourceLock)
+
 		voice->src.callback->OnVoiceProcessingPassStart(
 			voice->src.callback,
 			FAudio_INTERNAL_GetBytesRequested(voice, (uint32_t) toDecode)
 		);
+
+		FAudio_PlatformLockMutex(voice->audio->sourceLock);
+		LOG_MUTEX_LOCK(voice->audio, voice->audio->sourceLock)
+
+		FAudio_PlatformLockMutex(voice->sendLock);
+		LOG_MUTEX_LOCK(voice->audio, voice->sendLock)
 	}
+
+	FAudio_PlatformLockMutex(voice->src.bufferLock);
+	LOG_MUTEX_LOCK(voice->audio, voice->src.bufferLock)
 
 	/* Nothing to do? */
 	if (voice->src.bufferList == NULL)
 	{
 		FAudio_PlatformUnlockMutex(voice->src.bufferLock);
 		LOG_MUTEX_UNLOCK(voice->audio, voice->src.bufferLock)
+
+		if (voice->effects.count > 0 && voice->effects.state != FAPO_BUFFER_SILENT)
+		{
+			/* do not stop while the effect chain generates a non-silent buffer */
+			FAudio_INTERNAL_ResizeResampleCache(
+					voice->audio,
+					voice->src.resampleSamples * voice->src.format->nChannels
+			);
+			mixed = voice->src.resampleSamples;
+			FAudio_zero(
+				voice->audio->resampleCache,
+				mixed * voice->src.format->nChannels * sizeof(float)
+			);
+			finalSamples = voice->audio->resampleCache;
+			goto sendwork;
+		}
+
+		FAudio_PlatformUnlockMutex(voice->sendLock);
+		LOG_MUTEX_UNLOCK(voice->audio, voice->sendLock)
+
+		FAudio_PlatformUnlockMutex(voice->audio->sourceLock);
+		LOG_MUTEX_UNLOCK(voice->audio, voice->audio->sourceLock)
+
 		if (	voice->src.callback != NULL &&
 			voice->src.callback->OnVoiceProcessingPassEnd != NULL)
 		{
@@ -788,6 +875,10 @@ static void FAudio_INTERNAL_MixSource(FAudioSourceVoice *voice)
 				voice->src.callback
 			);
 		}
+
+		FAudio_PlatformLockMutex(voice->audio->sourceLock);
+		LOG_MUTEX_LOCK(voice->audio, voice->audio->sourceLock)
+
 		LOG_FUNC_EXIT(voice->audio)
 		return;
 	}
@@ -806,9 +897,27 @@ static void FAudio_INTERNAL_MixSource(FAudioSourceVoice *voice)
 	if (	voice->src.callback != NULL &&
 		voice->src.callback->OnVoiceProcessingPassEnd != NULL)
 	{
+		FAudio_PlatformUnlockMutex(voice->src.bufferLock);
+		LOG_MUTEX_UNLOCK(voice->audio, voice->src.bufferLock)
+
+		FAudio_PlatformUnlockMutex(voice->sendLock);
+		LOG_MUTEX_UNLOCK(voice->audio, voice->sendLock)
+
+		FAudio_PlatformUnlockMutex(voice->audio->sourceLock);
+		LOG_MUTEX_UNLOCK(voice->audio, voice->audio->sourceLock)
+
 		voice->src.callback->OnVoiceProcessingPassEnd(
 			voice->src.callback
 		);
+
+		FAudio_PlatformLockMutex(voice->audio->sourceLock);
+		LOG_MUTEX_LOCK(voice->audio, voice->audio->sourceLock)
+
+		FAudio_PlatformLockMutex(voice->sendLock);
+		LOG_MUTEX_LOCK(voice->audio, voice->sendLock)
+
+		FAudio_PlatformLockMutex(voice->src.bufferLock);
+		LOG_MUTEX_LOCK(voice->audio, voice->src.bufferLock)
 	}
 
 	/* Nothing to resample? */
@@ -816,6 +925,10 @@ static void FAudio_INTERNAL_MixSource(FAudioSourceVoice *voice)
 	{
 		FAudio_PlatformUnlockMutex(voice->src.bufferLock);
 		LOG_MUTEX_UNLOCK(voice->audio, voice->src.bufferLock)
+
+		FAudio_PlatformUnlockMutex(voice->sendLock);
+		LOG_MUTEX_UNLOCK(voice->audio, voice->sendLock)
+
 		LOG_FUNC_EXIT(voice->audio)
 		return;
 	}
@@ -841,6 +954,10 @@ static void FAudio_INTERNAL_MixSource(FAudioSourceVoice *voice)
 	}
 	else
 	{
+		FAudio_INTERNAL_ResizeResampleCache(
+				voice->audio,
+				voice->src.resampleSamples * voice->src.format->nChannels
+		);
 		voice->src.resample(
 			voice->audio->decodeCache,
 			voice->audio->resampleCache,
@@ -881,8 +998,6 @@ static void FAudio_INTERNAL_MixSource(FAudioSourceVoice *voice)
 	mixed = (uint32_t) toResample;
 
 sendwork:
-	FAudio_PlatformLockMutex(voice->sendLock);
-	LOG_MUTEX_LOCK(voice->audio, voice->sendLock)
 
 	/* Nowhere to send it? Just skip the rest...*/
 	if (voice->sends.SendCount == 0)
@@ -956,11 +1071,9 @@ sendwork:
 			mixed,
 			voice->outputChannels,
 			oChan,
-			voice->volume,
 			finalSamples,
 			stream,
-			voice->channelVolume,
-			voice->sendCoefficients[i]
+			voice->mixCoefficients[i]
 		);
 
 		if (voice->sends.pSends[i].Flags & FAUDIO_SEND_USEFILTER)
@@ -1011,6 +1124,10 @@ static void FAudio_INTERNAL_MixSubmix(FAudioSubmixVoice *voice)
 	}
 	else
 	{
+		FAudio_INTERNAL_ResizeResampleCache(
+				voice->audio,
+				voice->mix.outputSamples * voice->mix.inputChannels
+		);
 		voice->mix.resample(
 			voice->mix.inputCache,
 			voice->audio->resampleCache,
@@ -1086,11 +1203,9 @@ static void FAudio_INTERNAL_MixSubmix(FAudioSubmixVoice *voice)
 			resampled,
 			voice->outputChannels,
 			oChan,
-			1.0f,
 			finalSamples,
 			stream,
-			voice->channelVolume,
-			voice->sendCoefficients[i]
+			voice->mixCoefficients[i]
 		);
 
 		if (voice->sends.pSends[i].Flags & FAUDIO_SEND_USEFILTER)
@@ -1117,6 +1232,39 @@ end:
 		sizeof(float) * voice->mix.inputSamples
 	);
 	LOG_FUNC_EXIT(voice->audio)
+}
+
+static void FAudio_INTERNAL_FlushPendingBuffers(FAudioSourceVoice *voice)
+{
+	FAudioBufferEntry *entry;
+
+	FAudio_PlatformLockMutex(voice->src.bufferLock);
+	LOG_MUTEX_LOCK(voice->audio, voice->src.bufferLock)
+
+	/* Remove pending flushed buffers and send an event for each one */
+	while (voice->src.flushList != NULL)
+	{
+		entry = voice->src.flushList;
+		voice->src.flushList = voice->src.flushList->next;
+
+		if (voice->src.callback != NULL && voice->src.callback->OnBufferEnd != NULL)
+		{
+			FAudio_PlatformUnlockMutex(voice->audio->sourceLock);
+			LOG_MUTEX_UNLOCK(voice->audio, voice->audio->sourceLock)
+
+			voice->src.callback->OnBufferEnd(
+				voice->src.callback,
+				entry->buffer.pContext
+			);
+
+			FAudio_PlatformLockMutex(voice->audio->sourceLock);
+			LOG_MUTEX_LOCK(voice->audio, voice->audio->sourceLock)
+		}
+		voice->audio->pFree(entry);
+	}
+
+	FAudio_PlatformUnlockMutex(voice->src.bufferLock);
+	LOG_MUTEX_UNLOCK(voice->audio, voice->src.bufferLock)
 }
 
 static void FAUDIOCALL FAudio_INTERNAL_GenerateOutput(FAudio *audio, float *output)
@@ -1181,14 +1329,14 @@ static void FAUDIOCALL FAudio_INTERNAL_GenerateOutput(FAudio *audio, float *outp
 	while (list != NULL)
 	{
 		audio->processingSource = (FAudioSourceVoice*) list->entry;
-		FAudio_PlatformUnlockMutex(audio->sourceLock);
-		LOG_MUTEX_UNLOCK(audio, audio->sourceLock)
+
+		FAudio_INTERNAL_FlushPendingBuffers(audio->processingSource);
 		if (audio->processingSource->src.active)
 		{
 			FAudio_INTERNAL_MixSource(audio->processingSource);
+			FAudio_INTERNAL_FlushPendingBuffers(audio->processingSource);
 		}
-		FAudio_PlatformLockMutex(audio->sourceLock);
-		LOG_MUTEX_LOCK(audio, audio->sourceLock)
+
 		list = list->next;
 	}
 	audio->processingSource = NULL;
@@ -1291,6 +1439,8 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 void FAudio_INTERNAL_ResizeDecodeCache(FAudio *audio, uint32_t samples)
 {
 	LOG_FUNC_ENTER(audio)
+	FAudio_PlatformLockMutex(audio->sourceLock);
+	LOG_MUTEX_LOCK(audio, audio->sourceLock)
 	if (samples > audio->decodeSamples)
 	{
 		audio->decodeSamples = samples;
@@ -1299,34 +1449,8 @@ void FAudio_INTERNAL_ResizeDecodeCache(FAudio *audio, uint32_t samples)
 			sizeof(float) * audio->decodeSamples
 		);
 	}
-	LOG_FUNC_EXIT(audio)
-}
-
-void FAudio_INTERNAL_ResizeResampleCache(FAudio *audio, uint32_t samples)
-{
-	LOG_FUNC_ENTER(audio)
-	if (samples > audio->resampleSamples)
-	{
-		audio->resampleSamples = samples;
-		audio->resampleCache = (float*) audio->pRealloc(
-			audio->resampleCache,
-			sizeof(float) * audio->resampleSamples
-		);
-	}
-	LOG_FUNC_EXIT(audio)
-}
-
-void FAudio_INTERNAL_ResizeEffectChainCache(FAudio *audio, uint32_t samples)
-{
-	LOG_FUNC_ENTER(audio)
-	if (samples > audio->effectChainSamples)
-	{
-		audio->effectChainSamples = samples;
-		audio->effectChainCache = (float*) audio->pRealloc(
-			audio->effectChainCache,
-			sizeof(float) * audio->effectChainSamples
-		);
-	}
+	FAudio_PlatformUnlockMutex(audio->sourceLock);
+	LOG_MUTEX_UNLOCK(audio, audio->sourceLock)
 	LOG_FUNC_EXIT(audio)
 }
 
@@ -1337,6 +1461,7 @@ void FAudio_INTERNAL_AllocEffectChain(
 	uint32_t i;
 
 	LOG_FUNC_ENTER(voice->audio)
+	voice->effects.state = FAPO_BUFFER_VALID;
 	voice->effects.count = pEffectChain->EffectCount;
 	if (voice->effects.count == 0)
 	{
@@ -1396,6 +1521,79 @@ void FAudio_INTERNAL_FreeEffectChain(FAudioVoice *voice)
 	voice->audio->pFree(voice->effects.parameterUpdates);
 	voice->audio->pFree(voice->effects.inPlaceProcessing);
 	LOG_FUNC_EXIT(voice->audio)
+}
+
+uint32_t FAudio_INTERNAL_VoiceOutputFrequency(
+	FAudioVoice *voice,
+	const FAudioVoiceSends *pSendList
+) {
+	uint32_t outSampleRate;
+	uint32_t newResampleSamples;
+	uint64_t resampleSanityCheck;
+
+	LOG_FUNC_ENTER(voice->audio)
+
+	if ((pSendList == NULL) || (pSendList->SendCount == 0))
+	{
+		/* When we're deliberately given no sends, use master rate! */
+		outSampleRate = voice->audio->master->master.inputSampleRate;
+	}
+	else
+	{
+		outSampleRate = pSendList->pSends[0].pOutputVoice->type == FAUDIO_VOICE_MASTER ?
+			pSendList->pSends[0].pOutputVoice->master.inputSampleRate :
+			pSendList->pSends[0].pOutputVoice->mix.inputSampleRate;
+	}
+	newResampleSamples = (uint32_t) FAudio_ceil(
+		voice->audio->updateSize *
+		(double) outSampleRate /
+		(double) voice->audio->master->master.inputSampleRate
+	);
+	if (voice->type == FAUDIO_VOICE_SOURCE)
+	{
+		if (	(voice->src.resampleSamples != 0) &&
+			(newResampleSamples != voice->src.resampleSamples) &&
+			(voice->effects.count > 0)	)
+		{
+			LOG_FUNC_EXIT(voice->audio)
+			return FAUDIO_E_INVALID_CALL;
+		}
+		voice->src.resampleSamples = newResampleSamples;
+	}
+	else /* (voice->type == FAUDIO_VOICE_SUBMIX) */
+	{
+		if (	(voice->mix.outputSamples != 0) &&
+			(newResampleSamples != voice->mix.outputSamples) &&
+			(voice->effects.count > 0)	)
+		{
+			LOG_FUNC_EXIT(voice->audio)
+			return FAUDIO_E_INVALID_CALL;
+		}
+		voice->mix.outputSamples = newResampleSamples;
+
+		voice->mix.resampleStep = DOUBLE_TO_FIXED((
+			(double) voice->mix.inputSampleRate /
+			(double) outSampleRate
+		));
+
+		/* Because we used ceil earlier, there's a chance that
+		 * downsampling submixes will go past the number of samples
+		 * available. Sources can do this thanks to padding, but we
+		 * don't have that luxury for submixes, so unfortunately we
+		 * just have to undo the ceil and turn it into a floor.
+		 * -flibit
+		 */
+		resampleSanityCheck = (
+			voice->mix.resampleStep * voice->mix.outputSamples
+		) >> FIXED_PRECISION;
+		if (resampleSanityCheck > (voice->mix.inputSamples / voice->mix.inputChannels))
+		{
+			voice->mix.outputSamples -= 1;
+		}
+	}
+
+	LOG_FUNC_EXIT(voice->audio)
+	return 0;
 }
 
 const float FAUDIO_INTERNAL_MATRIX_DEFAULTS[8][8][64] =

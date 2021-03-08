@@ -1,6 +1,6 @@
 /* FAudio - XAudio Reimplementation for FNA
  *
- * Copyright (c) 2011-2020 Ethan Lee, Luigi Auriemma, and the MonoGame Team
+ * Copyright (c) 2011-2021 Ethan Lee, Luigi Auriemma, and the MonoGame Team
  *
  * This software is provided 'as-is', without any express or implied warranty.
  * In no event will the authors be held liable for any damages arising from
@@ -80,6 +80,7 @@ extern void UI_Init(
 	int *tw,
 	int *th
 );
+extern void UI_Quit();
 extern uint8_t UI_Update(
 	int ww,
 	int wh,
@@ -364,6 +365,7 @@ int main(int argc, char **argv)
 	FAudioTool_Quit();
 
 	/* Clean up. We out. */
+	UI_Quit();
 	glBindTexture(GL_TEXTURE_2D, 0);
 	glDeleteTextures(1, &fontTexture);
 	SDL_GL_DeleteContext(context);

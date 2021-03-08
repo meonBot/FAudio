@@ -1,6 +1,6 @@
 /* FAudio - XAudio Reimplementation for FNA
  *
- * Copyright (c) 2011-2020 Ethan Lee, Luigi Auriemma, and the MonoGame Team
+ * Copyright (c) 2011-2021 Ethan Lee, Luigi Auriemma, and the MonoGame Team
  *
  * This software is provided 'as-is', without any express or implied warranty.
  * In no event will the authors be held liable for any damages arising from
@@ -89,6 +89,10 @@ uint32_t FACTAudioEngine_Release(FACTAudioEngine *pEngine)
 	FAudio_PlatformDestroyMutex(pEngine->wbLock);
 	FAudio_PlatformUnlockMutex(pEngine->apiLock);
 	FAudio_PlatformDestroyMutex(pEngine->apiLock);
+	if (pEngine->settings != NULL)
+	{
+		pEngine->pFree(pEngine->settings);
+	}
 	pEngine->pFree(pEngine);
 	FAudio_PlatformRelease();
 	return 0;
@@ -505,7 +509,7 @@ uint32_t FACTAudioEngine_PrepareStreamingWave(
 	FACTStreamingParameters streamingParams,
 	uint32_t dwAlignment,
 	uint32_t *pdwSeekTable, /* Optional! */
-	uint8_t *pbWaveData,
+	uint8_t *pbWaveData, /* ABI bug, do not use! */
 	uint32_t dwPlayOffset,
 	uint8_t nLoopCount,
 	FACTWave **ppWave
@@ -524,7 +528,26 @@ uint32_t FACTAudioEngine_RegisterNotification(
 
 	FAudio_PlatformLockMutex(pEngine->apiLock);
 
-	if (pNotificationDescription->type == FACTNOTIFICATIONTYPE_CUEDESTROYED)
+	#define HANDLE_PERSIST(nt) \
+		if (pNotificationDescription->type == FACTNOTIFICATIONTYPE_##nt) \
+		{ \
+			if (pNotificationDescription->flags & FACT_FLAG_NOTIFICATION_PERSIST) \
+			{ \
+				pEngine->notifications |= NOTIFY_##nt; \
+				PERSIST_ACTION \
+			} \
+			else \
+			{ \
+				FAudio_assert(0 && "TODO: "#nt" notification!"); \
+			} \
+		}
+
+	/* Cues */
+	#define PERSIST_ACTION pEngine->cue_context = pNotificationDescription->pvContext;
+	HANDLE_PERSIST(CUEPREPARED)
+	else HANDLE_PERSIST(CUEPLAY)
+	else HANDLE_PERSIST(CUESTOP)
+	else if (pNotificationDescription->type == FACTNOTIFICATIONTYPE_CUEDESTROYED)
 	{
 		if (pNotificationDescription->flags & FACT_FLAG_NOTIFICATION_PERSIST)
 		{
@@ -537,6 +560,14 @@ uint32_t FACTAudioEngine_RegisterNotification(
 			pNotificationDescription->pCue->usercontext = pNotificationDescription->pvContext;
 		}
 	}
+	#undef PERSIST_ACTION
+
+	/* Markers */
+	#define PERSIST_ACTION
+	else HANDLE_PERSIST(MARKER)
+	#undef PERSIST_ACTION
+
+	/* SoundBank/WaveBank Destruction */
 	else if (pNotificationDescription->type == FACTNOTIFICATIONTYPE_SOUNDBANKDESTROYED)
 	{
 		if (pNotificationDescription->flags & FACT_FLAG_NOTIFICATION_PERSIST)
@@ -563,6 +594,21 @@ uint32_t FACTAudioEngine_RegisterNotification(
 			pNotificationDescription->pWaveBank->usercontext = pNotificationDescription->pvContext;
 		}
 	}
+
+	/* Variables, Auditioning Tool */
+	#define PERSIST_ACTION
+	else HANDLE_PERSIST(LOCALVARIABLECHANGED)
+	else HANDLE_PERSIST(GLOBALVARIABLECHANGED)
+	else HANDLE_PERSIST(GUICONNECTED)
+	else HANDLE_PERSIST(GUIDISCONNECTED)
+	#undef PERSIST_ACTION
+
+	/* Waves */
+	#define PERSIST_ACTION pEngine->wave_context = pNotificationDescription->pvContext;
+	else HANDLE_PERSIST(WAVEPREPARED)
+	else HANDLE_PERSIST(WAVEPLAY)
+	else HANDLE_PERSIST(WAVESTOP)
+	else HANDLE_PERSIST(WAVELOOPED)
 	else if (pNotificationDescription->type == FACTNOTIFICATIONTYPE_WAVEDESTROYED)
 	{
 		if (pNotificationDescription->flags & FACT_FLAG_NOTIFICATION_PERSIST)
@@ -576,10 +622,20 @@ uint32_t FACTAudioEngine_RegisterNotification(
 			pNotificationDescription->pWave->usercontext = pNotificationDescription->pvContext;
 		}
 	}
+	#undef PERSIST_ACTION
+
+	/* WaveBanks */
+	#define PERSIST_ACTION pEngine->wb_context = pNotificationDescription->pvContext;
+	else HANDLE_PERSIST(WAVEBANKPREPARED)
+	#undef PERSIST_ACTION
+
+	/* Anything else? */
 	else
 	{
 		FAudio_assert(0 && "TODO: Unimplemented notification!");
 	}
+
+	#undef HANDLE_PERSIST
 
 	FAudio_PlatformUnlockMutex(pEngine->apiLock);
 	return 0;
@@ -595,7 +651,26 @@ uint32_t FACTAudioEngine_UnRegisterNotification(
 
 	FAudio_PlatformLockMutex(pEngine->apiLock);
 
-	if (pNotificationDescription->type == FACTNOTIFICATIONTYPE_CUEDESTROYED)
+	#define HANDLE_PERSIST(nt) \
+		if (pNotificationDescription->type == FACTNOTIFICATIONTYPE_##nt) \
+		{ \
+			if (pNotificationDescription->flags & FACT_FLAG_NOTIFICATION_PERSIST) \
+			{ \
+				pEngine->notifications &= ~NOTIFY_##nt; \
+				PERSIST_ACTION \
+			} \
+			else \
+			{ \
+				FAudio_assert(0 && "TODO: "#nt" notification!"); \
+			} \
+		}
+
+	/* Cues */
+	#define PERSIST_ACTION pEngine->cue_context = pNotificationDescription->pvContext;
+	HANDLE_PERSIST(CUEPREPARED)
+	else HANDLE_PERSIST(CUEPLAY)
+	else HANDLE_PERSIST(CUESTOP)
+	else if (pNotificationDescription->type == FACTNOTIFICATIONTYPE_CUEDESTROYED)
 	{
 		if (pNotificationDescription->flags & FACT_FLAG_NOTIFICATION_PERSIST)
 		{
@@ -608,6 +683,14 @@ uint32_t FACTAudioEngine_UnRegisterNotification(
 			pNotificationDescription->pCue->usercontext = pNotificationDescription->pvContext;
 		}
 	}
+	#undef PERSIST_ACTION
+
+	/* Markers */
+	#define PERSIST_ACTION
+	else HANDLE_PERSIST(MARKER)
+	#undef PERSIST_ACTION
+
+	/* SoundBank/WaveBank Destruction */
 	else if (pNotificationDescription->type == FACTNOTIFICATIONTYPE_SOUNDBANKDESTROYED)
 	{
 		if (pNotificationDescription->flags & FACT_FLAG_NOTIFICATION_PERSIST)
@@ -634,6 +717,21 @@ uint32_t FACTAudioEngine_UnRegisterNotification(
 			pNotificationDescription->pWaveBank->usercontext = pNotificationDescription->pvContext;
 		}
 	}
+
+	/* Variables, Auditioning Tool */
+	#define PERSIST_ACTION
+	else HANDLE_PERSIST(LOCALVARIABLECHANGED)
+	else HANDLE_PERSIST(GLOBALVARIABLECHANGED)
+	else HANDLE_PERSIST(GUICONNECTED)
+	else HANDLE_PERSIST(GUIDISCONNECTED)
+	#undef PERSIST_ACTION
+
+	/* Waves */
+	#define PERSIST_ACTION pEngine->wave_context = pNotificationDescription->pvContext;
+	else HANDLE_PERSIST(WAVEPREPARED)
+	else HANDLE_PERSIST(WAVEPLAY)
+	else HANDLE_PERSIST(WAVESTOP)
+	else HANDLE_PERSIST(WAVELOOPED)
 	else if (pNotificationDescription->type == FACTNOTIFICATIONTYPE_WAVEDESTROYED)
 	{
 		if (pNotificationDescription->flags & FACT_FLAG_NOTIFICATION_PERSIST)
@@ -647,10 +745,20 @@ uint32_t FACTAudioEngine_UnRegisterNotification(
 			pNotificationDescription->pWave->usercontext = pNotificationDescription->pvContext;
 		}
 	}
+	#undef PERSIST_ACTION
+
+	/* WaveBanks */
+	#define PERSIST_ACTION pEngine->wb_context = pNotificationDescription->pvContext;
+	else HANDLE_PERSIST(WAVEBANKPREPARED)
+	#undef PERSIST_ACTION
+
+	/* Anything else? */
 	else
 	{
 		FAudio_assert(0 && "TODO: Unimplemented notification!");
 	}
+
+	#undef HANDLE_PERSIST
 
 	FAudio_PlatformUnlockMutex(pEngine->apiLock);
 	return 0;
@@ -879,6 +987,7 @@ uint16_t FACTSoundBank_GetCueIndex(
 	}
 
 	FAudio_PlatformLockMutex(pSoundBank->parentEngine->apiLock);
+	if (pSoundBank->cueNames != NULL)
 	for (i = 0; i < pSoundBank->cueCount; i += 1)
 	{
 		if (FAudio_strcmp(szFriendlyName, pSoundBank->cueNames[i]) == 0)
@@ -922,11 +1031,18 @@ uint32_t FACTSoundBank_GetCueProperties(
 
 	FAudio_PlatformLockMutex(pSoundBank->parentEngine->apiLock);
 
-	FAudio_strlcpy(
-		pProperties->friendlyName,
-		pSoundBank->cueNames[nCueIndex],
-		0xFF
-	);
+	if (pSoundBank->cueNames == NULL)
+	{
+		FAudio_zero(pProperties->friendlyName, 0xFF);
+	}
+	else
+	{
+		FAudio_strlcpy(
+			pProperties->friendlyName,
+			pSoundBank->cueNames[nCueIndex],
+			0xFF
+		);
+	}
 	if (!(pSoundBank->cues[nCueIndex].flags & 0x04))
 	{
 		for (i = 0; i < pSoundBank->variationCount; i += 1)
@@ -1066,7 +1182,10 @@ uint32_t FACTSoundBank_Play(
 	FACTCue *result;
 	if (pSoundBank == NULL)
 	{
-		*ppCue = NULL;
+		if (ppCue != NULL)
+		{
+			*ppCue = NULL;
+		}
 		return 1;
 	}
 
@@ -1105,7 +1224,10 @@ uint32_t FACTSoundBank_Play3D(
 	FACTCue *result;
 	if (pSoundBank == NULL)
 	{
-		*ppCue = NULL;
+		if (ppCue != NULL)
+		{
+			*ppCue = NULL;
+		}
 		return 1;
 	}
 
@@ -1278,11 +1400,14 @@ uint32_t FACTSoundBank_Destroy(FACTSoundBank *pSoundBank)
 	pSoundBank->parentEngine->pFree(pSoundBank->transitionCodes);
 
 	/* Cue Name data */
-	for (i = 0; i < pSoundBank->cueCount; i += 1)
+	if (pSoundBank->cueNames != NULL)
 	{
-		pSoundBank->parentEngine->pFree(pSoundBank->cueNames[i]);
+		for (i = 0; i < pSoundBank->cueCount; i += 1)
+		{
+			pSoundBank->parentEngine->pFree(pSoundBank->cueNames[i]);
+		}
+		pSoundBank->parentEngine->pFree(pSoundBank->cueNames);
 	}
-	pSoundBank->parentEngine->pFree(pSoundBank->cueNames);
 
 	/* Finally. */
 	if (pSoundBank->notifyOnDestroy || pSoundBank->parentEngine->notifications & NOTIFY_SOUNDBANKDESTROY)
@@ -1394,7 +1519,12 @@ uint32_t FACTWaveBank_Destroy(FACTWaveBank *pWaveBank)
 		}
 		pWaveBank->parentEngine->pFree(pWaveBank->seekTables);
 	}
-	FAudio_close(pWaveBank->io);
+
+	if (!pWaveBank->streaming)
+	{
+		FAudio_close(pWaveBank->io);
+	}
+
 	if (pWaveBank->packetBuffer != NULL)
 	{
 		pWaveBank->parentEngine->pFree(pWaveBank->packetBuffer);
@@ -1891,6 +2021,18 @@ uint32_t FACTWave_Stop(FACTWave *pWave, uint32_t dwFlags)
 		FAudioSourceVoice_ExitLoop(pWave->voice, 0);
 	}
 
+	if (pWave->parentBank->parentEngine->notifications & NOTIFY_WAVESTOP)
+	{
+		FACTNotification note;
+		note.type = FACTNOTIFICATIONTYPE_WAVESTOP;
+		note.wave.pWave = pWave;
+		if (pWave->parentBank->parentEngine->notifications & NOTIFY_WAVESTOP)
+		{
+			note.pvContext = pWave->parentBank->parentEngine->wave_context;
+		}
+		pWave->parentBank->parentEngine->notificationCallback(&note);
+	}
+
 	FAudio_PlatformUnlockMutex(pWave->parentBank->parentEngine->apiLock);
 	return 0;
 }
@@ -1990,13 +2132,11 @@ uint32_t FACTWave_SetMatrixCoefficients(
 	float *pMatrixCoefficients
 ) {
 	uint32_t i;
-	float *mtxDst, *mtxSrc;
+	float *mtxDst, *mtxSrc, *mtxTmp = NULL;
 	if (pWave == NULL)
 	{
 		return 1;
 	}
-
-	FAudio_PlatformLockMutex(pWave->parentBank->parentEngine->apiLock);
 
 	/* There seems to be this weird feature in XACT where the channel count
 	 * can be completely wrong and it'll go to the right place.
@@ -2007,20 +2147,31 @@ uint32_t FACTWave_SetMatrixCoefficients(
 	 */
 	if (uSrcChannelCount == 1 && pWave->srcChannels == 2)
 	{
-		mtxDst = pMatrixCoefficients + ((uDstChannelCount - 1) * 2);
-		mtxSrc = pMatrixCoefficients + (uDstChannelCount - 1);
+		mtxTmp = (float*) FAudio_alloca(
+			sizeof(float) *
+			pWave->srcChannels *
+			uDstChannelCount
+		);
+		mtxDst = mtxTmp;
+		mtxSrc = pMatrixCoefficients;
 		for (i = 0; i < uDstChannelCount; i += 1)
 		{
 			mtxDst[0] = *mtxSrc;
 			mtxDst[1] = *mtxSrc;
-			mtxDst -= 2;
-			mtxSrc -= 1;
+			mtxDst += 2;
+			mtxSrc += 1;
 		}
 		uSrcChannelCount = 2;
+		pMatrixCoefficients = mtxTmp;
 	}
 	else if (uSrcChannelCount == 2 && pWave->srcChannels == 1)
 	{
-		mtxDst = pMatrixCoefficients;
+		mtxTmp = (float*) FAudio_alloca(
+			sizeof(float) *
+			pWave->srcChannels *
+			uDstChannelCount
+		);
+		mtxDst = mtxTmp;
 		mtxSrc = pMatrixCoefficients;
 		for (i = 0; i < uDstChannelCount; i += 1)
 		{
@@ -2029,7 +2180,10 @@ uint32_t FACTWave_SetMatrixCoefficients(
 			mtxSrc += 2;
 		}
 		uSrcChannelCount = 1;
+		pMatrixCoefficients = mtxTmp;
 	}
+
+	FAudio_PlatformLockMutex(pWave->parentBank->parentEngine->apiLock);
 
 	FAudioVoice_SetOutputMatrix(
 		pWave->voice,
@@ -2041,6 +2195,10 @@ uint32_t FACTWave_SetMatrixCoefficients(
 	);
 
 	FAudio_PlatformUnlockMutex(pWave->parentBank->parentEngine->apiLock);
+	if (mtxTmp != NULL)
+	{
+		FAudio_dealloca(mtxTmp);
+	}
 	return 0;
 }
 
@@ -2162,6 +2320,9 @@ uint32_t FACTCue_Play(FACTCue *pCue)
 				FACT_STATE_STOPPING |
 				FACT_STATE_PAUSED
 			);
+
+			FACT_INTERNAL_SendCueNotification(pCue, NOTIFY_CUESTOP, FACTNOTIFICATIONTYPE_CUESTOP);
+
 			FAudio_PlatformUnlockMutex(
 				pCue->parentBank->parentEngine->apiLock
 			);
@@ -2260,6 +2421,9 @@ uint32_t FACTCue_Play(FACTCue *pCue)
 		FACT_STATE_STOPPED |
 		FACT_STATE_PREPARED
 	);
+
+	FACT_INTERNAL_SendCueNotification(pCue, NOTIFY_CUEPLAY, FACTNOTIFICATIONTYPE_CUEPLAY);
+
 	pCue->start = FAudio_timems();
 
 	/* If it's a simple wave, just play it! */
@@ -2358,8 +2522,11 @@ uint32_t FACTCue_Stop(FACTCue *pCue, uint32_t dwFlags)
 				pCue->maxRpcReleaseTime
 			);
 		}
-
-		pCue->state |= FACT_STATE_STOPPING;
+		else
+		{
+			/* Pretty sure this doesn't happen, but just in case? */
+			pCue->state |= FACT_STATE_STOPPING;
+		}
 	}
 
 	FAudio_PlatformUnlockMutex(pCue->parentBank->parentEngine->apiLock);

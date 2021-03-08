@@ -1,6 +1,6 @@
 /* FAudio - XAudio Reimplementation for FNA
  *
- * Copyright (c) 2011-2020 Ethan Lee, Luigi Auriemma, and the MonoGame Team
+ * Copyright (c) 2011-2021 Ethan Lee, Luigi Auriemma, and the MonoGame Team
  *
  * This software is provided 'as-is', without any express or implied warranty.
  * In no event will the authors be held liable for any damages arising from
@@ -660,12 +660,10 @@ void FAudio_OPERATIONSET_QueueExitLoop(
 	FAudioSourceVoice *voice,
 	uint32_t OperationSet
 ) {
-	FAudio_OPERATIONSET_Operation *op;
-
 	FAudio_PlatformLockMutex(voice->audio->operationLock);
 	LOG_MUTEX_LOCK(voice->audio, voice->audio->operationLock)
 
-	op = QueueOperation(
+	QueueOperation(
 		voice,
 		FAUDIOOP_EXITLOOP,
 		OperationSet

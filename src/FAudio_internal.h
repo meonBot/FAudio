@@ -1,6 +1,6 @@
 /* FAudio - XAudio Reimplementation for FNA
  *
- * Copyright (c) 2011-2020 Ethan Lee, Luigi Auriemma, and the MonoGame Team
+ * Copyright (c) 2011-2021 Ethan Lee, Luigi Auriemma, and the MonoGame Team
  *
  * This software is provided 'as-is', without any express or implied warranty.
  * In no event will the authors be held liable for any damages arising from
@@ -80,9 +80,32 @@
 #define FAudio_getenv getenv
 #define FAudio_PRIu64 PRIu64
 #define FAudio_PRIx64 PRIx64
+
+/* FIXME: Assuming little-endian! */
+#define FAudio_swap16LE(x) (x)
+#define FAudio_swap16BE(x) \
+	((x >> 8)	& 0x00FF) | \
+	((x << 8)	& 0xFF00)
+#define FAudio_swap32LE(x) (x)
+#define FAudio_swap32BE(x) \
+	((x >> 24)	& 0x000000FF) | \
+	((x >> 8)	& 0x0000FF00) | \
+	((x << 8)	& 0x00FF0000) | \
+	((x << 24)	& 0xFF000000)
+#define FAudio_swap64LE(x) (x)
+#define FAudio_swap64BE(x) \
+	((x >> 32)	& 0x00000000000000FF) | \
+	((x >> 24)	& 0x000000000000FF00) | \
+	((x >> 16)	& 0x0000000000FF0000) | \
+	((x >> 8)	& 0x00000000FF000000) | \
+	((x << 8)	& 0x000000FF00000000) | \
+	((x << 16)	& 0x0000FF0000000000) | \
+	((x << 24)	& 0x00FF000000000000) | \
+	((x << 32)	& 0xFF00000000000000)
 #else
 #include <SDL_stdinc.h>
 #include <SDL_assert.h>
+#include <SDL_endian.h>
 #include <SDL_log.h>
 
 #define FAudio_malloc SDL_malloc
@@ -141,6 +164,13 @@
 #define FAudio_getenv SDL_getenv
 #define FAudio_PRIu64 SDL_PRIu64
 #define FAudio_PRIx64 SDL_PRIx64
+
+#define FAudio_swap16LE(x) SDL_SwapLE16(x)
+#define FAudio_swap16BE(x) SDL_SwapBE16(x)
+#define FAudio_swap32LE(x) SDL_SwapLE32(x)
+#define FAudio_swap32BE(x) SDL_SwapBE32(x)
+#define FAudio_swap64LE(x) SDL_SwapLE64(x)
+#define FAudio_swap64BE(x) SDL_SwapBE64(x)
 #endif
 
 /* Easy Macros */
@@ -249,10 +279,8 @@ typedef void (FAUDIOCALL * FAudioMixCallback)(
 	uint32_t toMix,
 	uint32_t srcChans,
 	uint32_t dstChans,
-	float baseVolume,
 	float *restrict srcData,
 	float *restrict dstData,
-	float *restrict channelVolume,
 	float *restrict coefficients
 );
 
@@ -396,11 +424,13 @@ struct FAudioVoice
 
 	FAudioVoiceSends sends;
 	float **sendCoefficients;
+	float **mixCoefficients;
 	FAudioMixCallback *sendMix;
 	FAudioFilterParameters *sendFilter;
 	FAudioFilterState **sendFilterState;
 	struct
 	{
+		FAPOBufferFlags state;
 		uint32_t count;
 		FAudioEffectDescriptor *desc;
 		void **parameters;
@@ -434,10 +464,10 @@ struct FAudioVoice
 			uint64_t curBufferOffsetDec;
 			uint32_t curBufferOffset;
 
-			/* FFmpeg */
-#ifdef HAVE_FFMPEG
-			struct FAudioFFmpeg *ffmpeg;
-#endif /* HAVE_FFMPEG*/
+			/* GStreamer */
+#ifdef HAVE_GSTREAMER
+			struct FAudioGSTREAMER *gstreamer;
+#endif /* HAVE_GSTREAMER*/
 
 			/* Read-only */
 			float maxFreqRatio;
@@ -452,6 +482,7 @@ struct FAudioVoice
 			uint8_t newBuffer;
 			uint64_t totalSamples;
 			FAudioBufferEntry *bufferList;
+			FAudioBufferEntry *flushList;
 			FAudioMutex bufferLock;
 		} src;
 		struct
@@ -492,13 +523,15 @@ void FAudio_INTERNAL_InsertSubmixSorted(
 );
 void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output);
 void FAudio_INTERNAL_ResizeDecodeCache(FAudio *audio, uint32_t size);
-void FAudio_INTERNAL_ResizeResampleCache(FAudio *audio, uint32_t size);
-void FAudio_INTERNAL_ResizeEffectChainCache(FAudio *audio, uint32_t samples);
 void FAudio_INTERNAL_AllocEffectChain(
 	FAudioVoice *voice,
 	const FAudioEffectChain *pEffectChain
 );
 void FAudio_INTERNAL_FreeEffectChain(FAudioVoice *voice);
+uint32_t FAudio_INTERNAL_VoiceOutputFrequency(
+	FAudioVoice *voice,
+	const FAudioVoiceSends *pSendList
+);
 extern const float FAUDIO_INTERNAL_MATRIX_DEFAULTS[8][8][64];
 
 /* Debug */
@@ -656,15 +689,15 @@ extern void (*FAudio_INTERNAL_Amplify)(
 	float volume
 );
 
+extern FAudioMixCallback FAudio_INTERNAL_Mix_Generic;
+
 #define MIX_FUNC(type) \
 	extern void FAudio_INTERNAL_Mix_##type##_Scalar( \
 		uint32_t toMix, \
 		uint32_t srcChans, \
 		uint32_t dstChans, \
-		float baseVolume, \
 		float *restrict srcData, \
 		float *restrict dstData, \
-		float *restrict channelVolume, \
 		float *restrict coefficients \
 	);
 MIX_FUNC(Generic)
@@ -697,18 +730,15 @@ DECODE_FUNC(PCM32F)
 DECODE_FUNC(MonoMSADPCM)
 DECODE_FUNC(StereoMSADPCM)
 DECODE_FUNC(WMAERROR)
-#ifdef HAVE_FFMPEG
-DECODE_FUNC(FFMPEG)
-#endif /* HAVE_FFMPEG */
 #undef DECODE_FUNC
 
-/* FFmpeg */
+/* GStreamer */
 
-#ifdef HAVE_FFMPEG
-uint32_t FAudio_FFMPEG_init(FAudioSourceVoice *pSourceVoice, uint32_t type);
-void FAudio_FFMPEG_free(FAudioSourceVoice *voice);
-void FAudio_FFMPEG_reset(FAudioSourceVoice *voice);
-#endif /* HAVE_FFMPEG */
+#ifdef HAVE_GSTREAMER
+uint32_t FAudio_GSTREAMER_init(FAudioSourceVoice *pSourceVoice, uint32_t type);
+void FAudio_GSTREAMER_free(FAudioSourceVoice *voice);
+void FAudio_GSTREAMER_end_buffer(FAudioSourceVoice *voice);
+#endif /* HAVE_GSTREAMER */
 
 /* Platform Functions */
 
@@ -768,7 +798,8 @@ static inline uint32_t GetMask(uint16_t channels)
 static inline void WriteWaveFormatExtensible(
 	FAudioWaveFormatExtensible *fmt,
 	int channels,
-	int samplerate
+	int samplerate,
+	const FAudioGUID *subformat
 ) {
 	FAudio_assert(fmt != NULL);
 	fmt->Format.wBitsPerSample = 32;
@@ -786,7 +817,7 @@ static inline void WriteWaveFormatExtensible(
 	fmt->Format.cbSize = sizeof(FAudioWaveFormatExtensible) - sizeof(FAudioWaveFormatEx);
 	fmt->Samples.wValidBitsPerSample = 32;
 	fmt->dwChannelMask = GetMask(fmt->Format.nChannels);
-	FAudio_memcpy(&fmt->SubFormat, &DATAFORMAT_SUBTYPE_IEEE_FLOAT, sizeof(FAudioGUID));
+	FAudio_memcpy(&fmt->SubFormat, subformat, sizeof(FAudioGUID));
 }
 
 /* Resampling */
